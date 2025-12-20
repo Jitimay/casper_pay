@@ -1,0 +1,16 @@
+[package]
+name = "escrow-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+casper-contract = "3.0"
+casper-types = "3.0"
+
+[[bin]]
+name = "escrow-contract"
+path = "src/main.rs"
+
+[profile.release]
+codegen-units = 1
+lto = true
