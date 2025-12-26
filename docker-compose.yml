@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  relayer:
+    build:
+      context: ./relayer
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    volumes:
+      # Mount the database file to persist data outside the container
+      - ./relayer/db.json:/usr/src/app/db.json
+    env_file:
+      - ./relayer/.env
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - relayer
+    restart: always
+
+volumes:
+  relayer-data:

@@ -11,7 +11,9 @@
     "casper-js-sdk": "^2.15.7",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
-    "express": "^4.22.1"
+    "express": "^4.22.1",
+    "lowdb": "^7.0.1",
+    "pm2": "^6.0.14"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

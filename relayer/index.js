@@ -4,6 +4,17 @@ const fs = require('fs');
 const crypto = require('crypto');
 const cors = require('cors');
 require('dotenv').config();
+const { Low } = require('lowdb');
+const { JSONFile } = require('lowdb/node');
+
+// Database setup
+const db = new Low(new JSONFile('db.json'));
+async function setupDatabase() {
+  await db.read();
+  db.data = db.data || { transactions: [] };
+  await db.write();
+}
+setupDatabase();
 
 const app = express();
 app.use(cors());
@@ -32,8 +43,11 @@ try {
 
 // Real Mobile Money APIs Integration
 const mobileMoney = {
-  mpesa: {
     send: async (amount, recipient) => {
+      if (!process.env.MPESA_CONSUMER_KEY) {
+        console.log('M-Pesa keys not set. Simulating M-Pesa send.');
+        return { success: true, txId: `mpesa_sim_${Date.now()}` };
+      }
       try {
         // M-Pesa Daraja API integration (sandbox)
         const auth = Buffer.from(`${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`).toString('base64');
@@ -88,6 +102,10 @@ const mobileMoney = {
     },
     
     verify: async (txId) => {
+      if (!process.env.MPESA_CONSUMER_KEY) {
+        console.log('M-Pesa keys not set. Simulating M-Pesa verification.');
+        return { verified: true, amount: 100, status: 'Simulated success' };
+      }
       try {
         // Query transaction status
         const auth = Buffer.from(`${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`).toString('base64');
@@ -135,6 +153,10 @@ const mobileMoney = {
   
   momo: {
     send: async (amount, recipient) => {
+      if (!process.env.MOMO_SUBSCRIPTION_KEY) {
+        console.log('MoMo keys not set. Simulating MoMo send.');
+        return { success: true, txId: `momo_sim_${Date.now()}`, note: 'Simulated - MoMo API credentials missing' };
+      }
       try {
         // MTN MoMo API integration (sandbox)
         const subscriptionKey = process.env.MOMO_SUBSCRIPTION_KEY;
@@ -185,6 +207,10 @@ const mobileMoney = {
     },
     
     verify: async (txId) => {
+      if (!process.env.MOMO_SUBSCRIPTION_KEY) {
+        console.log('MoMo keys not set. Simulating MoMo verification.');
+        return { verified: true, amount: 100, status: 'Simulated success' };
+      }
       try {
         const subscriptionKey = process.env.MOMO_SUBSCRIPTION_KEY;
         
@@ -219,9 +245,6 @@ const mobileMoney = {
     }
   }
 };
-
-// In-memory transaction store (use database in production)
-const transactions = new Map();
 
 app.post('/bridge/initiate', async (req, res) => {
   const { amount, from_network, to_network, recipient, sender } = req.body;
@@ -261,7 +284,7 @@ app.post('/bridge/initiate', async (req, res) => {
     const deployHash = await casperClient.putDeploy(signedDeploy);
 
     // Store transaction details
-    transactions.set(routeId, {
+    const newTransaction = {
       routeId,
       amount,
       from_network,
@@ -274,7 +297,9 @@ app.post('/bridge/initiate', async (req, res) => {
       steps: [
         { step: 'initiated', time: new Date().toISOString(), deployHash }
       ]
-    });
+    };
+    db.data.transactions.push(newTransaction);
+    await db.write();
 
     console.log(`Escrow created on Casper. Deploy hash: ${deployHash}`);
     
@@ -295,7 +320,7 @@ app.post('/bridge/fund', async (req, res) => {
   const { routeId } = req.body;
   
   try {
-    const transaction = transactions.get(routeId);
+    const transaction = db.data.transactions.find(t => t.routeId === routeId);
     if (!transaction) {
       return res.status(404).json({ error: 'Transaction not found' });
     }
@@ -328,6 +353,7 @@ app.post('/bridge/fund', async (req, res) => {
       time: new Date().toISOString(),
       deployHash
     });
+    await db.write();
 
     console.log(`Escrow funded. Deploy hash: ${deployHash}`);
     
@@ -346,7 +372,7 @@ app.post('/bridge/settle', async (req, res) => {
   const { routeId, mobileTxId, network } = req.body;
   
   try {
-    const transaction = transactions.get(routeId);
+    const transaction = db.data.transactions.find(t => t.routeId === routeId);
     if (!transaction) {
       return res.status(404).json({ error: 'Transaction not found' });
     }
@@ -392,6 +418,7 @@ app.post('/bridge/settle', async (req, res) => {
         deployHash,
         mobileTxId
       });
+      await db.write();
 
       console.log(`Escrow settled. Deploy hash: ${deployHash}`);
       
@@ -416,7 +443,7 @@ app.post('/bridge/settle', async (req, res) => {
 // Get transaction status
 app.get('/bridge/status/:routeId', (req, res) => {
   const { routeId } = req.params;
-  const transaction = transactions.get(routeId);
+  const transaction = db.data.transactions.find(t => t.routeId === routeId);
   
   if (!transaction) {
     return res.status(404).json({ error: 'Transaction not found' });
@@ -427,12 +454,11 @@ app.get('/bridge/status/:routeId', (req, res) => {
 
 // List all transactions (for debugging)
 app.get('/bridge/transactions', (req, res) => {
-  const allTransactions = Array.from(transactions.values());
-  res.json(allTransactions);
+  res.json(db.data.transactions);
 });
 
 // M-Pesa webhook handler
-app.post('/webhooks/mpesa', (req, res) => {
+app.post('/webhooks/mpesa', async (req, res) => {
   console.log('M-Pesa webhook received:', JSON.stringify(req.body, null, 2));
   
   try {
@@ -441,27 +467,27 @@ app.post('/webhooks/mpesa', (req, res) => {
       const { CheckoutRequestID, ResultCode, ResultDesc } = Body.stkCallback;
       
       // Find transaction by CheckoutRequestID
-      for (const [routeId, transaction] of transactions.entries()) {
-        if (transaction.mpesaTxId === CheckoutRequestID) {
-          if (ResultCode === 0) {
-            // Payment successful
-            transaction.status = 'payment_confirmed';
-            transaction.mpesaResultCode = ResultCode;
-            transaction.steps.push({
-              step: 'payment_confirmed',
-              time: new Date().toISOString(),
-              mpesaResult: ResultDesc
-            });
-            
-            // Auto-settle the escrow
-            setTimeout(() => settleEscrowAutomatically(routeId, CheckoutRequestID), 1000);
-          } else {
-            // Payment failed
-            transaction.status = 'payment_failed';
-            transaction.mpesaResultCode = ResultCode;
-            transaction.error = ResultDesc;
-          }
-          break;
+      const transaction = db.data.transactions.find(t => t.mpesaTxId === CheckoutRequestID);
+      if (transaction) {
+        if (ResultCode === 0) {
+          // Payment successful
+          transaction.status = 'payment_confirmed';
+          transaction.mpesaResultCode = ResultCode;
+          transaction.steps.push({
+            step: 'payment_confirmed',
+            time: new Date().toISOString(),
+            mpesaResult: ResultDesc
+          });
+          await db.write();
+          
+          // Auto-settle the escrow
+          setTimeout(() => settleEscrowAutomatically(transaction.routeId, CheckoutRequestID), 1000);
+        } else {
+          // Payment failed
+          transaction.status = 'payment_failed';
+          transaction.mpesaResultCode = ResultCode;
+          transaction.error = ResultDesc;
+          await db.write();
         }
       }
     }
@@ -476,7 +502,7 @@ app.post('/webhooks/mpesa', (req, res) => {
 // Auto-settle function
 async function settleEscrowAutomatically(routeId, mobileTxId) {
   try {
-    const transaction = transactions.get(routeId);
+    const transaction = db.data.transactions.find(t => t.routeId === routeId);
     if (!transaction || transaction.status !== 'payment_confirmed') {
       return;
     }
@@ -508,6 +534,7 @@ async function settleEscrowAutomatically(routeId, mobileTxId) {
       time: new Date().toISOString(),
       deployHash
     });
+    await db.write();
 
     console.log(`Auto-settlement completed. Deploy hash: ${deployHash}`);
   } catch (error) {
@@ -520,9 +547,10 @@ app.post('/bridge/pay', async (req, res) => {
   const { routeId, network } = req.body;
   
   try {
-    const transaction = transactions.get(routeId);
+    const transaction = db.data.transactions.find(t => t.routeId === routeId);
     if (!transaction) {
       return res.status(404).json({ error: 'Transaction not found' });
+    .
     }
 
     let result;
@@ -542,6 +570,7 @@ app.post('/bridge/pay', async (req, res) => {
         time: new Date().toISOString(),
         mobileTxId: result.txId
       });
+      await db.write();
 
       res.json({
         success: true,

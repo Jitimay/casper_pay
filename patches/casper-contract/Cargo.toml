@@ -1,0 +1,7 @@
+[package]
+name = "casper-contract"
+version = "5.1.0"
+edition = "2021"
+
+[dependencies]
+casper-types = "6.1"
